@@ -1,5 +1,6 @@
 import { memo, useRef, useMemo, useEffect, useState, useCallback } from 'react';
 import { useWatch } from 'react-hook-form';
+import { AnimatePresence, motion } from 'framer-motion';
 import { TextareaAutosize } from '@librechat/client';
 import { useRecoilState, useRecoilValue } from 'recoil';
 import { Constants, isAssistantsEndpoint, isAgentsEndpoint } from 'librechat-data-provider';
@@ -18,14 +19,15 @@ import {
   useQueryParams,
   useSubmitMessage,
   useFocusChatEffect,
+  useAudioRecorder,
 } from '~/hooks';
+import { InlineWaveform, DictateButton } from './Recording';
 import { mainTextareaId, BadgeItem } from '~/common';
 import AttachFileChat from './Files/AttachFileChat';
 import FileFormChat from './Files/FileFormChat';
 import { cn, removeFocusRings } from '~/utils';
 import TextareaHeader from './TextareaHeader';
 import PromptsCommand from './PromptsCommand';
-import AudioRecorder from './AudioRecorder';
 import CollapseChat from './CollapseChat';
 import StreamAudio from './StreamAudio';
 import StopButton from './StopButton';
@@ -129,6 +131,22 @@ const ChatForm = memo(({ index = 0 }: { index?: number }) => {
   });
 
   const { submitMessage, submitPrompt } = useSubmitMessage();
+
+  // Audio recorder hook - ChatGPT-style inline dictation
+  const {
+    dictateState,
+    isRecordingMode,
+    analyserNode,
+    startRecording,
+    cancelRecording,
+    confirmRecording,
+  } = useAudioRecorder({
+    setValue: methods.setValue,
+    getValues: methods.getValues,
+    reset: methods.reset,
+    ask: submitMessage,
+    isSubmitting,
+  });
 
   const handleKeyUp = useHandleKeyUp({
     index,
@@ -238,120 +256,191 @@ const ChatForm = memo(({ index = 0 }: { index?: number }) => {
           )}
           <PromptsCommand index={index} textAreaRef={textAreaRef} submitPrompt={submitPrompt} />
           <div
-            onClick={handleContainerClick}
+            onClick={!isRecordingMode ? handleContainerClick : undefined}
             className={cn(
               'relative flex w-full flex-grow flex-col overflow-hidden rounded-t-3xl border pb-4 text-text-primary transition-all duration-200 sm:rounded-3xl sm:pb-0',
-              isTextAreaFocused ? 'shadow-lg' : 'shadow-md',
+              isTextAreaFocused && !isRecordingMode ? 'shadow-lg' : 'shadow-md',
               isTemporary
                 ? 'border-violet-800/60 bg-violet-950/10'
                 : 'border-border-light bg-surface-chat',
             )}
           >
-            <TextareaHeader addedConvo={addedConvo} setAddedConvo={setAddedConvo} />
-            {/* WIP */}
-            <EditBadges
-              isEditingChatBadges={isEditingBadges}
-              handleCancelBadges={handleCancelBadges}
-              handleSaveBadges={handleSaveBadges}
-              setBadges={setBadges}
-            />
-            <FileFormChat conversation={conversation} />
-            {endpoint && (
-              <div className={cn('flex', isRTL ? 'flex-row-reverse' : 'flex-row')}>
-                <div
-                  className="relative flex-1"
-                  style={
-                    isCollapsed
-                      ? {
-                          WebkitMaskImage: 'linear-gradient(to bottom, black 60%, transparent 90%)',
-                          maskImage: 'linear-gradient(to bottom, black 60%, transparent 90%)',
-                        }
-                      : undefined
-                  }
+            {/* Waveform overlay - floats ABOVE textarea area but BEHIND buttons */}
+            <AnimatePresence>
+              {isRecordingMode && (
+                <motion.div
+                  key="waveform-overlay"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="pointer-events-none absolute inset-0 z-[5]"
                 >
-                  <TextareaAutosize
-                    {...registerProps}
-                    ref={(e) => {
-                      ref(e);
-                      (textAreaRef as React.MutableRefObject<HTMLTextAreaElement | null>).current =
-                        e;
-                    }}
-                    disabled={disableInputs || isNotAppendable}
-                    onPaste={handlePaste}
-                    onKeyDown={handleKeyDown}
-                    onKeyUp={handleKeyUp}
-                    onCompositionStart={handleCompositionStart}
-                    onCompositionEnd={handleCompositionEnd}
-                    id={mainTextareaId}
-                    tabIndex={0}
-                    data-testid="text-input"
-                    rows={1}
-                    onFocus={() => {
-                      handleFocusOrClick();
-                      setIsTextAreaFocused(true);
-                    }}
-                    onBlur={setIsTextAreaFocused.bind(null, false)}
-                    aria-label={localize('com_ui_message_input')}
-                    onClick={handleFocusOrClick}
-                    style={{ height: 44, overflowY: 'auto' }}
-                    className={cn(
-                      baseClasses,
-                      removeFocusRings,
-                      'scrollbar-hover transition-[max-height] duration-200 disabled:cursor-not-allowed',
-                    )}
+                  <InlineWaveform
+                    analyserNode={analyserNode ?? null}
+                    isTranscribing={dictateState === 'transcribing'}
                   />
-                </div>
-                <div className="flex flex-col items-start justify-start pr-2.5 pt-1.5">
-                  <CollapseChat
-                    isCollapsed={isCollapsed}
-                    isScrollable={isMoreThanThreeRows}
-                    setIsCollapsed={setIsCollapsed}
-                  />
-                </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+            {/* Header sections - z-0, waveform floats above these */}
+            <div className="relative z-0">
+              <TextareaHeader addedConvo={addedConvo} setAddedConvo={setAddedConvo} />
+              {/* WIP */}
+              <EditBadges
+                isEditingChatBadges={isEditingBadges}
+                handleCancelBadges={handleCancelBadges}
+                handleSaveBadges={handleSaveBadges}
+                setBadges={setBadges}
+              />
+              <FileFormChat conversation={conversation} />
+            </div>
+            {endpoint && (
+              <div className={cn('relative z-0 flex', isRTL ? 'flex-row-reverse' : 'flex-row')}>
+                <AnimatePresence mode="wait">
+                  {!isRecordingMode ? (
+                    <motion.div
+                      key="textarea"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                      className="relative flex-1"
+                      style={
+                        isCollapsed
+                          ? {
+                              WebkitMaskImage:
+                                'linear-gradient(to bottom, black 60%, transparent 90%)',
+                              maskImage: 'linear-gradient(to bottom, black 60%, transparent 90%)',
+                            }
+                          : undefined
+                      }
+                    >
+                      <TextareaAutosize
+                        {...registerProps}
+                        ref={(e) => {
+                          ref(e);
+                          (
+                            textAreaRef as React.MutableRefObject<HTMLTextAreaElement | null>
+                          ).current = e;
+                        }}
+                        disabled={disableInputs || isNotAppendable}
+                        onPaste={handlePaste}
+                        onKeyDown={handleKeyDown}
+                        onKeyUp={handleKeyUp}
+                        onCompositionStart={handleCompositionStart}
+                        onCompositionEnd={handleCompositionEnd}
+                        id={mainTextareaId}
+                        tabIndex={0}
+                        data-testid="text-input"
+                        rows={1}
+                        onFocus={() => {
+                          handleFocusOrClick();
+                          setIsTextAreaFocused(true);
+                        }}
+                        onBlur={setIsTextAreaFocused.bind(null, false)}
+                        aria-label={localize('com_ui_message_input')}
+                        onClick={handleFocusOrClick}
+                        style={{ height: 44, overflowY: 'auto' }}
+                        className={cn(
+                          baseClasses,
+                          removeFocusRings,
+                          'scrollbar-hover transition-[max-height] duration-200 disabled:cursor-not-allowed',
+                        )}
+                      />
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="recording-spacer"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                      className="relative flex-1"
+                      style={{ minHeight: 52 }}
+                    >
+                      {/* Spacer - waveform renders at container level behind everything */}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                {!isRecordingMode && (
+                  <div className="flex flex-col items-start justify-start pr-2.5 pt-1.5">
+                    <CollapseChat
+                      isCollapsed={isCollapsed}
+                      isScrollable={isMoreThanThreeRows}
+                      setIsCollapsed={setIsCollapsed}
+                    />
+                  </div>
+                )}
               </div>
             )}
+            {/* Bottom action bar - z-10 keeps buttons above waveform overlay */}
             <div
               className={cn(
-                '@container items-between flex gap-2 pb-2',
+                '@container items-between relative z-10 flex gap-2 pb-2',
                 isRTL ? 'flex-row-reverse' : 'flex-row',
               )}
             >
+              {/* Left side: Attach file */}
               <div className={`${isRTL ? 'mr-2' : 'ml-2'}`}>
                 <AttachFileChat conversation={conversation} disableInputs={disableInputs} />
               </div>
-              <BadgeRow
-                showEphemeralBadges={
-                  !!endpoint && !isAgentsEndpoint(endpoint) && !isAssistantsEndpoint(endpoint)
-                }
-                isSubmitting={isSubmitting}
-                conversationId={conversationId}
-                onChange={setBadges}
-                isInChat={
-                  Array.isArray(conversation?.messages) && conversation.messages.length >= 1
-                }
-              />
-              <div className="mx-auto flex" />
-              {SpeechToText && (
-                <AudioRecorder
-                  methods={methods}
-                  ask={submitMessage}
-                  textAreaRef={textAreaRef}
-                  disabled={disableInputs || isNotAppendable}
+
+              {/* Middle: Badge row (hidden during recording) */}
+              {!isRecordingMode && (
+                <BadgeRow
+                  showEphemeralBadges={
+                    !!endpoint && !isAgentsEndpoint(endpoint) && !isAssistantsEndpoint(endpoint)
+                  }
                   isSubmitting={isSubmitting}
+                  conversationId={conversationId}
+                  onChange={setBadges}
+                  isInChat={
+                    Array.isArray(conversation?.messages) && conversation.messages.length >= 1
+                  }
                 />
               )}
-              <div className={`${isRTL ? 'ml-2' : 'mr-2'}`}>
-                {isSubmitting && showStopButton ? (
-                  <StopButton stop={handleStopGenerating} setShowStopButton={setShowStopButton} />
-                ) : (
-                  endpoint && (
-                    <SendButton
-                      ref={submitButtonRef}
-                      control={methods.control}
-                      disabled={filesLoading || isSubmitting || disableInputs || isNotAppendable}
-                    />
-                  )
+
+              {/* Spacer */}
+              <div className="mx-auto flex" />
+
+              {/* Right side: Dictate + Send/Stop buttons */}
+              <div className={cn('flex items-center gap-1', isRTL ? 'ml-2' : 'mr-2')}>
+                {/* Dictate button - ChatGPT style */}
+                {SpeechToText && (
+                  <DictateButton
+                    state={dictateState}
+                    disabled={disableInputs || isNotAppendable}
+                    onStartRecording={startRecording}
+                    onCancelRecording={cancelRecording}
+                    onConfirmRecording={confirmRecording}
+                  />
                 )}
+
+                {/* Send/Stop button - hidden during recording */}
+                <AnimatePresence mode="wait">
+                  {!isRecordingMode && (
+                    <motion.div
+                      key="send-stop"
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      {isSubmitting && showStopButton ? (
+                        <StopButton stop={handleStopGenerating} setShowStopButton={setShowStopButton} />
+                      ) : (
+                        endpoint && (
+                          <SendButton
+                            ref={submitButtonRef}
+                            control={methods.control}
+                            disabled={filesLoading || isSubmitting || disableInputs || isNotAppendable}
+                          />
+                        )
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
             {TextToSpeech && automaticPlayback && <StreamAudio index={index} />}
