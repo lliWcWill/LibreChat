@@ -406,7 +406,7 @@ const ChatForm = memo(({ index = 0 }: { index?: number }) => {
 
               {/* Right side: Dictate + Send/Stop buttons */}
               <div className={cn('flex items-center gap-1', isRTL ? 'ml-2' : 'mr-2')}>
-                {/* Dictate button - ChatGPT style */}
+                {/* Dictate button */}
                 {SpeechToText && (
                   <DictateButton
                     state={dictateState}

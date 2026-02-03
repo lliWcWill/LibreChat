@@ -9,16 +9,8 @@ interface InlineWaveformProps {
 }
 
 /**
- * Professional DAW-style waveform visualizer.
- *
- * TUNING GUIDE (for the user):
- * ────────────────────────────
- * - SCALE:      maxBarHeight (line ~58) - controls vertical size (0.5 = 50% of container)
- * - GAIN:       gain (line ~75) - amplifies input signal (higher = louder peaks)
- * - SPEED:      scrollSpeed (line ~52) - pixels per second scrolling
- * - SMOOTHING:  analyserNode.smoothingTimeConstant (line ~137) - 0 = raw, 0.8 = smooth
- * - BAR WIDTH:  barWidth (line ~54) - thicker bars = less detail
- * - BAR GAP:    barGap (line ~55) - space between bars
+ * WaveSurfer-style waveform with sharp peaks.
+ * Uses frequency data for that classic EQ/spectrum look.
  */
 export default function InlineWaveform({
   analyserNode,
@@ -27,9 +19,9 @@ export default function InlineWaveform({
 }: InlineWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
-  const amplitudeHistoryRef = useRef<number[]>([]);
+  const historyRef = useRef<number[][]>([]);
+  const scrollOffsetRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
-  const scrollAccumRef = useRef<number>(0);
 
   const draw = useCallback((timestamp: number) => {
     const canvas = canvasRef.current;
@@ -44,22 +36,20 @@ export default function InlineWaveform({
       return;
     }
 
-    // Delta time for frame-rate independent animation
     const deltaTime = lastTimeRef.current ? (timestamp - lastTimeRef.current) / 1000 : 0.016;
     lastTimeRef.current = timestamp;
 
     // ═══════════════════════════════════════════════════════
-    // TUNING PARAMETERS - Adjust these for different feels
+    // TUNING - WaveSurfer style sharp peaks
     // ═══════════════════════════════════════════════════════
-    const scrollSpeed = 90;      // Pixels per second (higher = faster scroll)
-    const barWidth = 1.5;         // Bar thickness in pixels (smaller = zoomed out)
-    const barGap = 0.5;           // Gap between bars (smaller = zoomed out)
-    const minBarHeight = 2;       // Minimum bar height (silent state)
-    const maxBarHeight = 0.7;    // 0-1 scale of container height (0.85 = 85%)
-    const gain = 3.5;             // Input amplification (higher = more sensitive)
+    const scrollSpeed = 88;        // Pixels per second
+    const lineWidth = 1;           // Thin lines for sharp look
+    const lineGap = 1;             // Minimal gap
+    const waveColor = 'rgba(255, 255, 255, 0.85)';
+    const silentColor = 'rgba(107, 114, 128, 0.3)';
     // ═══════════════════════════════════════════════════════
 
-    // High-DPI canvas setup
+    // High-DPI
     const dpr = window.devicePixelRatio || 1;
     const displayWidth = canvas.clientWidth;
     const displayHeight = canvas.clientHeight;
@@ -72,105 +62,81 @@ export default function InlineWaveform({
 
     ctx.clearRect(0, 0, displayWidth, displayHeight);
 
-    // Calculate bar layout
-    const pixelsPerBar = barWidth + barGap;
-    const barCount = Math.floor(displayWidth / pixelsPerBar) + 2;
     const centerY = displayHeight / 2;
-    const maxHeight = displayHeight * maxBarHeight;
+    const maxHeight = displayHeight * 0.9;
+    const pixelsPerSample = lineWidth + lineGap;
+    const samplesNeeded = Math.ceil(displayWidth / pixelsPerSample) + 2;
 
-    // Colors - subtle when silent, bright white when active
-    const silentColor = 'rgba(107, 114, 128, 0.3)';   // Gray-500 at 30%
-    const activeColor = 'rgba(255, 255, 255, 0.95)';  // Near-white
-
-    // ═══════════════════════════════════════════════════════
-    // AUDIO AMPLITUDE DETECTION - True instantaneous peaks
-    // ═══════════════════════════════════════════════════════
-    let currentAmplitude = 0;
+    // Get frequency data - this gives us the sharp peaks
+    let frequencyData: number[] = [];
 
     if (analyserNode && !isTranscribing) {
-      const bufferLength = analyserNode.fftSize;
-      const floatData = new Float32Array(bufferLength);
-      analyserNode.getFloatTimeDomainData(floatData);
+      const bufferLength = analyserNode.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyserNode.getByteFrequencyData(dataArray);
 
-      // Find TRUE instantaneous peak (no averaging, no RMS)
-      // This gives the raw, uncompressed signal peak
-      let peak = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const sample = Math.abs(floatData[i]);
-        if (sample > peak) peak = sample;
+      // Sample across frequency spectrum, normalize to 0-1
+      const step = Math.floor(bufferLength / 64);
+      for (let i = 0; i < 64; i++) {
+        const idx = i * step;
+        frequencyData.push(dataArray[idx] / 255);
       }
-
-      // Apply gain and soft-clip at 1.0 (allows full dynamic range)
-      currentAmplitude = Math.min(peak * gain, 1.0);
+    } else {
+      frequencyData = new Array(64).fill(0);
     }
 
-    // Initialize history array if needed
-    if (amplitudeHistoryRef.current.length !== barCount) {
-      amplitudeHistoryRef.current = new Array(barCount).fill(0);
-    }
+    // Scroll and push new data
+    scrollOffsetRef.current += scrollSpeed * deltaTime;
 
-    // ═══════════════════════════════════════════════════════
-    // SCROLLING - Continuous right-to-left train animation
-    // ═══════════════════════════════════════════════════════
-    scrollAccumRef.current += scrollSpeed * deltaTime;
-
-    // When we've scrolled past one bar width, shift and add new sample
-    while (scrollAccumRef.current >= pixelsPerBar) {
-      scrollAccumRef.current -= pixelsPerBar;
-      // Push new amplitude to the front (newest on right)
-      amplitudeHistoryRef.current.unshift(currentAmplitude);
-      // Trim excess
-      if (amplitudeHistoryRef.current.length > barCount) {
-        amplitudeHistoryRef.current.pop();
+    while (scrollOffsetRef.current >= pixelsPerSample) {
+      scrollOffsetRef.current -= pixelsPerSample;
+      historyRef.current.unshift([...frequencyData]);
+      if (historyRef.current.length > samplesNeeded) {
+        historyRef.current.pop();
       }
     }
 
-    // ═══════════════════════════════════════════════════════
-    // RENDERING - Draw bars from right to left
-    // ═══════════════════════════════════════════════════════
-    for (let i = 0; i < barCount; i++) {
-      const amplitude = amplitudeHistoryRef.current[i] ?? 0;
+    // Initialize if empty
+    while (historyRef.current.length < samplesNeeded) {
+      historyRef.current.push(new Array(64).fill(0));
+    }
 
-      // X position: rightmost at i=0, scrolling left
-      const x = displayWidth - (i + 1) * pixelsPerBar + scrollAccumRef.current;
+    // Draw waveform - sharp vertical lines from center
+    for (let i = 0; i < samplesNeeded && i < historyRef.current.length; i++) {
+      const sample = historyRef.current[i];
+      const x = displayWidth - (i * pixelsPerSample) + scrollOffsetRef.current;
 
-      // Skip bars outside visible area
-      if (x + barWidth < 0 || x > displayWidth) continue;
+      if (x < -lineWidth || x > displayWidth + lineWidth) continue;
 
-      // Calculate height - direct mapping, no additional smoothing
-      const height = Math.max(amplitude * maxHeight, minBarHeight);
-      const y = centerY - height / 2;
+      // Average the frequency bands for this column
+      const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
 
-      // Color based on activity threshold
-      const isActive = amplitude > 0.02;
-      ctx.fillStyle = isActive ? activeColor : silentColor;
+      // Also get the peak for sharp spikes
+      const peak = Math.max(...sample);
 
-      // Draw rounded bar
-      ctx.beginPath();
-      if (typeof ctx.roundRect === 'function') {
-        ctx.roundRect(x, y, barWidth, height, 1.5);
+      // Blend average and peak for visual interest
+      const amplitude = avg * 0.4 + peak * 0.6;
+      const height = amplitude * maxHeight;
+
+      if (amplitude > 0.02) {
+        // Draw mirrored waveform from center
+        ctx.fillStyle = waveColor;
+        ctx.fillRect(x, centerY - height / 2, lineWidth, height);
       } else {
-        ctx.rect(x, y, barWidth, height);
+        // Silent - tiny dot
+        ctx.fillStyle = silentColor;
+        ctx.fillRect(x, centerY - 1, lineWidth, 2);
       }
-      ctx.fill();
     }
 
     animFrameRef.current = requestAnimationFrame(draw);
   }, [analyserNode, isTranscribing]);
 
   useEffect(() => {
-    // ═══════════════════════════════════════════════════════
-    // ANALYSER CONFIG - Critical for responsiveness
-    // ═══════════════════════════════════════════════════════
     if (analyserNode) {
-      // smoothingTimeConstant: 0 = NO smoothing (raw peaks)
-      // Higher values (0.8) = more averaged/smooth
-      // For DAW-style rapid response, use 0 or very low
-      analyserNode.smoothingTimeConstant = 0;
-
-      // fftSize: Higher = more samples per read (more accurate peaks)
-      // 2048 or 4096 is good for voice
-      analyserNode.fftSize = 2048;
+      // Low smoothing for sharp, responsive peaks
+      analyserNode.smoothingTimeConstant = 0.3;
+      analyserNode.fftSize = 256; // Smaller = faster, more responsive
     }
 
     animFrameRef.current = requestAnimationFrame(draw);
@@ -181,10 +147,9 @@ export default function InlineWaveform({
     };
   }, [draw, analyserNode]);
 
-  // Reset state when analyser changes
   useEffect(() => {
-    amplitudeHistoryRef.current = [];
-    scrollAccumRef.current = 0;
+    historyRef.current = [];
+    scrollOffsetRef.current = 0;
     lastTimeRef.current = 0;
   }, [analyserNode]);
 
